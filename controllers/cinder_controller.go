@@ -680,7 +680,7 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 	//
 	// Create Secrets required as input for the Service and calculate an overall hash of hashes
 	//
-	err = r.generateServiceConfigs(ctx, helper, instance, &configVars, serviceLabels, memcached, db)
+	err = r.generateServiceConfigs(ctx, helper, instance, &configVars, serviceLabels, memcached, db, transportURL)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.ServiceConfigReadyCondition,
@@ -971,6 +971,7 @@ func (r *CinderReconciler) generateServiceConfigs(
 	serviceLabels map[string]string,
 	memcached *memcachedv1.Memcached,
 	db *mariadbv1.Database,
+	transportURL *rabbitmqv1.TransportURL,
 ) error {
 	//
 	// create Secret required for cinder input
@@ -1032,6 +1033,11 @@ func (r *CinderReconciler) generateServiceConfigs(
 	templateParameters["MemcachedServersWithInet"] = memcached.GetMemcachedServerListWithInetString()
 	templateParameters["MemcachedServers"] = memcached.GetMemcachedServerListString()
 	templateParameters["TimeOut"] = instance.Spec.APITimeout
+
+	// Quorum queues configuration
+	if transportURL.GetQuorumQueues() {
+		templateParameters["RabbitQuorumQueue"] = true
+	}
 
 	// MTLS
 	if memcached.GetMemcachedMTLSSecret() != "" {
