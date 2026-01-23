@@ -143,44 +143,101 @@ func (spec *CinderSpecCore) Default() {
 	spec.CinderSpecBase.Default()
 }
 
+// deprecatedFieldPair represents a pair of deprecated and new field values for validation
+type deprecatedFieldPair struct {
+	deprecatedValue string
+	newValue        string
+	deprecatedPath  *field.Path
+	newPath         *field.Path
+}
+
+// deprecatedFieldPairPtr represents a pair of deprecated and new *string field values for validation
+type deprecatedFieldPairPtr struct {
+	deprecatedValue *string
+	newValue        *string
+	deprecatedPath  *field.Path
+	newPath         *field.Path
+}
+
 // validateDeprecatedFieldsCreate validates deprecated fields during CREATE operations
 func (spec *CinderSpecBase) validateDeprecatedFieldsCreate(basePath *field.Path) ([]string, field.ErrorList) {
 	var allWarns []string
 
-	// Check for deprecated rabbitMqClusterName field usage
-	if spec.RabbitMqClusterName != "" {
-		warning, _ := common_webhook.ValidateDeprecatedFieldConflict(
-			spec.RabbitMqClusterName,
-			spec.MessagingBus.Cluster,
-			basePath.Child("rabbitMqClusterName"),
-			basePath.Child("messagingBus").Child("cluster"),
-			true, // allowBothIfSame - supports webhook defaulting
-		)
-		if warning != "" {
-			allWarns = append(allWarns, warning)
-		}
+	// Build list of field pairs to validate
+	stringPairs := []deprecatedFieldPair{
+		{
+			deprecatedValue: spec.RabbitMqClusterName,
+			newValue:        spec.MessagingBus.Cluster,
+			deprecatedPath:  basePath.Child("rabbitMqClusterName"),
+			newPath:         basePath.Child("messagingBus").Child("cluster"),
+		},
 	}
 
-	// Check for deprecated notificationsBusInstance field usage
-	if spec.NotificationsBusInstance != nil && *spec.NotificationsBusInstance != "" {
-		warning, _ := common_webhook.ValidateDeprecatedFieldConflictPtr(
-			spec.NotificationsBusInstance,
-			func() *string {
+	ptrPairs := []deprecatedFieldPairPtr{
+		{
+			deprecatedValue: spec.NotificationsBusInstance,
+			newValue: func() *string {
 				if spec.NotificationsBus != nil {
 					return &spec.NotificationsBus.Cluster
 				}
 				return nil
 			}(),
-			basePath.Child("notificationsBusInstance"),
-			basePath.Child("notificationsBus").Child("cluster"),
-			true, // allowBothIfSame
-		)
-		if warning != "" {
-			allWarns = append(allWarns, warning)
+			deprecatedPath: basePath.Child("notificationsBusInstance"),
+			newPath:        basePath.Child("notificationsBus").Child("cluster"),
+		},
+	}
+
+	// Validate string field pairs
+	for _, pair := range stringPairs {
+		if pair.deprecatedValue != "" {
+			warning, _ := common_webhook.ValidateDeprecatedFieldConflict(
+				pair.deprecatedValue,
+				pair.newValue,
+				pair.deprecatedPath,
+				pair.newPath,
+				true, // allowBothIfSame - supports webhook defaulting
+			)
+			if warning != "" {
+				allWarns = append(allWarns, warning)
+			}
+		}
+	}
+
+	// Validate *string field pairs
+	for _, pair := range ptrPairs {
+		if pair.deprecatedValue != nil && *pair.deprecatedValue != "" {
+			warning, _ := common_webhook.ValidateDeprecatedFieldConflictPtr(
+				pair.deprecatedValue,
+				pair.newValue,
+				pair.deprecatedPath,
+				pair.newPath,
+				true, // allowBothIfSame
+			)
+			if warning != "" {
+				allWarns = append(allWarns, warning)
+			}
 		}
 	}
 
 	return allWarns, nil
+}
+
+// deprecatedFieldPairUpdate represents a pair of old and new values for UPDATE validation
+type deprecatedFieldPairUpdate struct {
+	oldDeprecated string
+	newDeprecated string
+	newValue      string
+	deprecatedPath *field.Path
+	newPath        *field.Path
+}
+
+// deprecatedFieldPairPtrUpdate represents a pair of old and new *string values for UPDATE validation
+type deprecatedFieldPairPtrUpdate struct {
+	oldDeprecated *string
+	newDeprecated *string
+	newValue      *string
+	deprecatedPath *field.Path
+	newPath        *field.Path
 }
 
 // validateDeprecatedFieldsUpdate validates deprecated fields during UPDATE operations
@@ -188,57 +245,86 @@ func (spec *CinderSpecBase) validateDeprecatedFieldsUpdate(old CinderSpecBase, b
 	var allErrs field.ErrorList
 	var allWarns []string
 
-	// Validate deprecated RabbitMqClusterName field
-	warning, err := common_webhook.ValidateDeprecatedFieldConflict(
-		spec.RabbitMqClusterName,
-		spec.MessagingBus.Cluster,
-		basePath.Child("rabbitMqClusterName"),
-		basePath.Child("messagingBus").Child("cluster"),
-		true, // allowBothIfSame - supports webhook defaulting
-	)
-	if warning != "" {
-		allWarns = append(allWarns, warning)
-	}
-	if err != nil {
-		allErrs = append(allErrs, err)
+	// Build list of field pairs to validate
+	stringPairs := []deprecatedFieldPairUpdate{
+		{
+			oldDeprecated:  old.RabbitMqClusterName,
+			newDeprecated:  spec.RabbitMqClusterName,
+			newValue:       spec.MessagingBus.Cluster,
+			deprecatedPath: basePath.Child("rabbitMqClusterName"),
+			newPath:        basePath.Child("messagingBus").Child("cluster"),
+		},
 	}
 
-	if err := common_webhook.ValidateDeprecatedFieldChange(
-		old.RabbitMqClusterName,
-		spec.RabbitMqClusterName,
-		basePath.Child("rabbitMqClusterName"),
-		basePath.Child("messagingBus").Child("cluster"),
-	); err != nil {
-		allErrs = append(allErrs, err)
+	ptrPairs := []deprecatedFieldPairPtrUpdate{
+		{
+			oldDeprecated:  old.NotificationsBusInstance,
+			newDeprecated:  spec.NotificationsBusInstance,
+			newValue: func() *string {
+				if spec.NotificationsBus != nil {
+					return &spec.NotificationsBus.Cluster
+				}
+				return nil
+			}(),
+			deprecatedPath: basePath.Child("notificationsBusInstance"),
+			newPath:        basePath.Child("notificationsBus").Child("cluster"),
+		},
 	}
 
-	// Validate deprecated NotificationsBusInstance field
-	warning, err = common_webhook.ValidateDeprecatedFieldConflictPtr(
-		spec.NotificationsBusInstance,
-		func() *string {
-			if spec.NotificationsBus != nil {
-				return &spec.NotificationsBus.Cluster
-			}
-			return nil
-		}(),
-		basePath.Child("notificationsBusInstance"),
-		basePath.Child("notificationsBus").Child("cluster"),
-		true, // allowBothIfSame
-	)
-	if warning != "" {
-		allWarns = append(allWarns, warning)
-	}
-	if err != nil {
-		allErrs = append(allErrs, err)
+	// Validate string field pairs
+	for _, pair := range stringPairs {
+		// Check for conflicts
+		warning, err := common_webhook.ValidateDeprecatedFieldConflict(
+			pair.newDeprecated,
+			pair.newValue,
+			pair.deprecatedPath,
+			pair.newPath,
+			true, // allowBothIfSame - supports webhook defaulting
+		)
+		if warning != "" {
+			allWarns = append(allWarns, warning)
+		}
+		if err != nil {
+			allErrs = append(allErrs, err)
+		}
+
+		// Check for changes to deprecated field
+		if err := common_webhook.ValidateDeprecatedFieldChange(
+			pair.oldDeprecated,
+			pair.newDeprecated,
+			pair.deprecatedPath,
+			pair.newPath,
+		); err != nil {
+			allErrs = append(allErrs, err)
+		}
 	}
 
-	if err := common_webhook.ValidateDeprecatedFieldChangePtr(
-		old.NotificationsBusInstance,
-		spec.NotificationsBusInstance,
-		basePath.Child("notificationsBusInstance"),
-		basePath.Child("notificationsBus").Child("cluster"),
-	); err != nil {
-		allErrs = append(allErrs, err)
+	// Validate *string field pairs
+	for _, pair := range ptrPairs {
+		// Check for conflicts
+		warning, err := common_webhook.ValidateDeprecatedFieldConflictPtr(
+			pair.newDeprecated,
+			pair.newValue,
+			pair.deprecatedPath,
+			pair.newPath,
+			true, // allowBothIfSame
+		)
+		if warning != "" {
+			allWarns = append(allWarns, warning)
+		}
+		if err != nil {
+			allErrs = append(allErrs, err)
+		}
+
+		// Check for changes to deprecated field
+		if err := common_webhook.ValidateDeprecatedFieldChangePtr(
+			pair.oldDeprecated,
+			pair.newDeprecated,
+			pair.deprecatedPath,
+			pair.newPath,
+		); err != nil {
+			allErrs = append(allErrs, err)
+		}
 	}
 
 	return allWarns, allErrs
