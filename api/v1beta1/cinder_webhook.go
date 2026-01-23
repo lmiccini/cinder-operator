@@ -143,6 +143,107 @@ func (spec *CinderSpecCore) Default() {
 	spec.CinderSpecBase.Default()
 }
 
+// validateDeprecatedFieldsCreate validates deprecated fields during CREATE operations
+func (spec *CinderSpecBase) validateDeprecatedFieldsCreate(basePath *field.Path) ([]string, field.ErrorList) {
+	var allWarns []string
+
+	// Check for deprecated rabbitMqClusterName field usage
+	if spec.RabbitMqClusterName != "" {
+		warning, _ := common_webhook.ValidateDeprecatedFieldConflict(
+			spec.RabbitMqClusterName,
+			spec.MessagingBus.Cluster,
+			basePath.Child("rabbitMqClusterName"),
+			basePath.Child("messagingBus").Child("cluster"),
+			true, // allowBothIfSame - supports webhook defaulting
+		)
+		if warning != "" {
+			allWarns = append(allWarns, warning)
+		}
+	}
+
+	// Check for deprecated notificationsBusInstance field usage
+	if spec.NotificationsBusInstance != nil && *spec.NotificationsBusInstance != "" {
+		warning, _ := common_webhook.ValidateDeprecatedFieldConflictPtr(
+			spec.NotificationsBusInstance,
+			func() *string {
+				if spec.NotificationsBus != nil {
+					return &spec.NotificationsBus.Cluster
+				}
+				return nil
+			}(),
+			basePath.Child("notificationsBusInstance"),
+			basePath.Child("notificationsBus").Child("cluster"),
+			true, // allowBothIfSame
+		)
+		if warning != "" {
+			allWarns = append(allWarns, warning)
+		}
+	}
+
+	return allWarns, nil
+}
+
+// validateDeprecatedFieldsUpdate validates deprecated fields during UPDATE operations
+func (spec *CinderSpecBase) validateDeprecatedFieldsUpdate(old CinderSpecBase, basePath *field.Path) ([]string, field.ErrorList) {
+	var allErrs field.ErrorList
+	var allWarns []string
+
+	// Validate deprecated RabbitMqClusterName field
+	warning, err := common_webhook.ValidateDeprecatedFieldConflict(
+		spec.RabbitMqClusterName,
+		spec.MessagingBus.Cluster,
+		basePath.Child("rabbitMqClusterName"),
+		basePath.Child("messagingBus").Child("cluster"),
+		true, // allowBothIfSame - supports webhook defaulting
+	)
+	if warning != "" {
+		allWarns = append(allWarns, warning)
+	}
+	if err != nil {
+		allErrs = append(allErrs, err)
+	}
+
+	if err := common_webhook.ValidateDeprecatedFieldChange(
+		old.RabbitMqClusterName,
+		spec.RabbitMqClusterName,
+		basePath.Child("rabbitMqClusterName"),
+		basePath.Child("messagingBus").Child("cluster"),
+	); err != nil {
+		allErrs = append(allErrs, err)
+	}
+
+	// Validate deprecated NotificationsBusInstance field
+	warning, err = common_webhook.ValidateDeprecatedFieldConflictPtr(
+		spec.NotificationsBusInstance,
+		func() *string {
+			if spec.NotificationsBus != nil {
+				return &spec.NotificationsBus.Cluster
+			}
+			return nil
+		}(),
+		basePath.Child("notificationsBusInstance"),
+		basePath.Child("notificationsBus").Child("cluster"),
+		true, // allowBothIfSame
+	)
+	if warning != "" {
+		allWarns = append(allWarns, warning)
+	}
+	if err != nil {
+		allErrs = append(allErrs, err)
+	}
+
+	if err := common_webhook.ValidateDeprecatedFieldChangePtr(
+		old.NotificationsBusInstance,
+		spec.NotificationsBusInstance,
+		basePath.Child("notificationsBusInstance"),
+		basePath.Child("notificationsBus").Child("cluster"),
+	); err != nil {
+		allErrs = append(allErrs, err)
+	}
+
+	return allWarns, allErrs
+}
+
 var _ webhook.Validator = &Cinder{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
@@ -194,38 +295,10 @@ func (spec *CinderSpec) ValidateCreate(
 	var allErrs field.ErrorList
 	var allWarns admission.Warnings
 
-	// Check for deprecated rabbitMqClusterName field usage
-	if spec.RabbitMqClusterName != "" {
-		warning, _ := common_webhook.ValidateDeprecatedFieldConflict(
-			spec.RabbitMqClusterName,
-			spec.MessagingBus.Cluster,
-			basePath.Child("rabbitMqClusterName"),
-			basePath.Child("messagingBus").Child("cluster"),
-			true, // allowBothIfSame - supports webhook defaulting
-		)
-		if warning != "" {
-			allWarns = append(allWarns, warning)
-		}
-	}
-
-	// Check for deprecated notificationsBusInstance field usage
-	if spec.NotificationsBusInstance != nil && *spec.NotificationsBusInstance != "" {
-		warning, _ := common_webhook.ValidateDeprecatedFieldConflictPtr(
-			spec.NotificationsBusInstance,
-			func() *string {
-				if spec.NotificationsBus != nil {
-					return &spec.NotificationsBus.Cluster
-				}
-				return nil
-			}(),
-			basePath.Child("notificationsBusInstance"),
-			basePath.Child("notificationsBus").Child("cluster"),
-			true, // allowBothIfSame
-		)
-		if warning != "" {
-			allWarns = append(allWarns, warning)
-		}
-	}
+	// Validate deprecated fields using shared helper
+	warns, errs := spec.CinderSpecBase.validateDeprecatedFieldsCreate(basePath)
+	allWarns = append(allWarns, warns...)
+	allErrs = append(allErrs, errs...)
 
 	// validate the service override key is valid
 	allErrs = append(allErrs, service.ValidateRoutedOverrides(
@@ -250,38 +323,10 @@ func (spec *CinderSpecCore) ValidateCreate(
 	var allErrs field.ErrorList
 	var allWarns admission.Warnings
 
-	// Check for deprecated rabbitMqClusterName field usage
-	if spec.RabbitMqClusterName != "" {
-		warning, _ := common_webhook.ValidateDeprecatedFieldConflict(
-			spec.RabbitMqClusterName,
-			spec.MessagingBus.Cluster,
-			basePath.Child("rabbitMqClusterName"),
-			basePath.Child("messagingBus").Child("cluster"),
-			true, // allowBothIfSame - supports webhook defaulting
-		)
-		if warning != "" {
-			allWarns = append(allWarns, warning)
-		}
-	}
-
-	// Check for deprecated notificationsBusInstance field usage
-	if spec.NotificationsBusInstance != nil && *spec.NotificationsBusInstance != "" {
-		warning, _ := common_webhook.ValidateDeprecatedFieldConflictPtr(
-			spec.NotificationsBusInstance,
-			func() *string {
-				if spec.NotificationsBus != nil {
-					return &spec.NotificationsBus.Cluster
-				}
-				return nil
-			}(),
-			basePath.Child("notificationsBusInstance"),
-			basePath.Child("notificationsBus").Child("cluster"),
-			true, // allowBothIfSame
-		)
-		if warning != "" {
-			allWarns = append(allWarns, warning)
-		}
-	}
+	// Validate deprecated fields using shared helper
+	warns, errs := spec.CinderSpecBase.validateDeprecatedFieldsCreate(basePath)
+	allWarns = append(allWarns, warns...)
+	allErrs = append(allErrs, errs...)
 
 	// validate the service override key is valid
 	allErrs = append(allErrs, service.ValidateRoutedOverrides(
@@ -356,58 +401,10 @@ func (spec *CinderSpec) ValidateUpdate(
 	var allErrs field.ErrorList
 	var allWarns []string
 
-	// Validate deprecated RabbitMqClusterName field
-	warning, err := common_webhook.ValidateDeprecatedFieldConflict(
-		spec.RabbitMqClusterName,
-		spec.MessagingBus.Cluster,
-		basePath.Child("rabbitMqClusterName"),
-		basePath.Child("messagingBus").Child("cluster"),
-		true, // allowBothIfSame - supports webhook defaulting
-	)
-	if warning != "" {
-		allWarns = append(allWarns, warning)
-	}
-	if err != nil {
-		allErrs = append(allErrs, err)
-	}
-
-	if err := common_webhook.ValidateDeprecatedFieldChange(
-		old.RabbitMqClusterName,
-		spec.RabbitMqClusterName,
-		basePath.Child("rabbitMqClusterName"),
-		basePath.Child("messagingBus").Child("cluster"),
-	); err != nil {
-		allErrs = append(allErrs, err)
-	}
-
-	// Validate deprecated NotificationsBusInstance field
-	warning, err = common_webhook.ValidateDeprecatedFieldConflictPtr(
-		spec.NotificationsBusInstance,
-		func() *string {
-			if spec.NotificationsBus != nil {
-				return &spec.NotificationsBus.Cluster
-			}
-			return nil
-		}(),
-		basePath.Child("notificationsBusInstance"),
-		basePath.Child("notificationsBus").Child("cluster"),
-		true, // allowBothIfSame
-	)
-	if warning != "" {
-		allWarns = append(allWarns, warning)
-	}
-	if err != nil {
-		allErrs = append(allErrs, err)
-	}
-
-	if err := common_webhook.ValidateDeprecatedFieldChangePtr(
-		old.NotificationsBusInstance,
-		spec.NotificationsBusInstance,
-		basePath.Child("notificationsBusInstance"),
-		basePath.Child("notificationsBus").Child("cluster"),
-	); err != nil {
-		allErrs = append(allErrs, err)
-	}
+	// Validate deprecated fields using shared helper
+	warns, errs := spec.CinderSpecBase.validateDeprecatedFieldsUpdate(old.CinderSpecBase, basePath)
+	allWarns = append(allWarns, warns...)
+	allErrs = append(allErrs, errs...)
 
 	// validate the service override key is valid
 	allErrs = append(allErrs, service.ValidateRoutedOverrides(
@@ -435,58 +432,10 @@ func (spec *CinderSpecCore) ValidateUpdate(
 	var allErrs field.ErrorList
 	var allWarns []string
 
-	// Validate deprecated RabbitMqClusterName field
-	warning, err := common_webhook.ValidateDeprecatedFieldConflict(
-		spec.RabbitMqClusterName,
-		spec.MessagingBus.Cluster,
-		basePath.Child("rabbitMqClusterName"),
-		basePath.Child("messagingBus").Child("cluster"),
-		true, // allowBothIfSame - supports webhook defaulting
-	)
-	if warning != "" {
-		allWarns = append(allWarns, warning)
-	}
-	if err != nil {
-		allErrs = append(allErrs, err)
-	}
-
-	if err := common_webhook.ValidateDeprecatedFieldChange(
-		old.RabbitMqClusterName,
-		spec.RabbitMqClusterName,
-		basePath.Child("rabbitMqClusterName"),
-		basePath.Child("messagingBus").Child("cluster"),
-	); err != nil {
-		allErrs = append(allErrs, err)
-	}
-
-	// Validate deprecated NotificationsBusInstance field
-	warning, err = common_webhook.ValidateDeprecatedFieldConflictPtr(
-		spec.NotificationsBusInstance,
-		func() *string {
-			if spec.NotificationsBus != nil {
-				return &spec.NotificationsBus.Cluster
-			}
-			return nil
-		}(),
-		basePath.Child("notificationsBusInstance"),
-		basePath.Child("notificationsBus").Child("cluster"),
-		true, // allowBothIfSame
-	)
-	if warning != "" {
-		allWarns = append(allWarns, warning)
-	}
-	if err != nil {
-		allErrs = append(allErrs, err)
-	}
-
-	if err := common_webhook.ValidateDeprecatedFieldChangePtr(
-		old.NotificationsBusInstance,
-		spec.NotificationsBusInstance,
-		basePath.Child("notificationsBusInstance"),
-		basePath.Child("notificationsBus").Child("cluster"),
-	); err != nil {
-		allErrs = append(allErrs, err)
-	}
+	// Validate deprecated fields using shared helper
+	warns, errs := spec.CinderSpecBase.validateDeprecatedFieldsUpdate(old.CinderSpecBase, basePath)
+	allWarns = append(allWarns, warns...)
+	allErrs = append(allErrs, errs...)
 
 	// validate the service override key is valid
 	allErrs = append(allErrs, service.ValidateRoutedOverrides(
