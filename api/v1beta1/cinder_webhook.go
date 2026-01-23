@@ -143,16 +143,62 @@ func (spec *CinderSpecCore) Default() {
 	spec.CinderSpecBase.Default()
 }
 
+// getDeprecatedFields returns the centralized list of deprecated fields for CinderSpecBase
+func (spec *CinderSpecBase) getDeprecatedFields(old *CinderSpecBase) []common_webhook.DeprecatedFieldUpdate {
+	// Get new field value (handle nil NotificationsBus)
+	var newNotifBusCluster *string
+	if spec.NotificationsBus != nil {
+		newNotifBusCluster = &spec.NotificationsBus.Cluster
+	}
+
+	deprecatedFields := []common_webhook.DeprecatedFieldUpdate{
+		{
+			DeprecatedFieldName: "rabbitMqClusterName",
+			NewFieldPath:        []string{"messagingBus", "cluster"},
+			NewDeprecatedValue:  &spec.RabbitMqClusterName,
+			NewValue:            &spec.MessagingBus.Cluster,
+		},
+		{
+			DeprecatedFieldName: "notificationsBusInstance",
+			NewFieldPath:        []string{"notificationsBus", "cluster"},
+			NewDeprecatedValue:  spec.NotificationsBusInstance,
+			NewValue:            newNotifBusCluster,
+		},
+	}
+
+	// If old spec is provided (UPDATE operation), add old values
+	if old != nil {
+		deprecatedFields[0].OldDeprecatedValue = &old.RabbitMqClusterName
+		deprecatedFields[1].OldDeprecatedValue = old.NotificationsBusInstance
+	}
+
+	return deprecatedFields
+}
+
 // validateDeprecatedFieldsCreate validates deprecated fields during CREATE operations
-// using reflection to automatically discover fields with deprecated tags
 func (spec *CinderSpecBase) validateDeprecatedFieldsCreate(basePath *field.Path) ([]string, field.ErrorList) {
-	return common_webhook.ValidateDeprecatedFieldsCreate(*spec, basePath), nil
+	// Get deprecated fields list (without old values for CREATE)
+	deprecatedFieldsUpdate := spec.getDeprecatedFields(nil)
+
+	// Convert to DeprecatedField list for CREATE validation
+	deprecatedFields := make([]common_webhook.DeprecatedField, len(deprecatedFieldsUpdate))
+	for i, df := range deprecatedFieldsUpdate {
+		deprecatedFields[i] = common_webhook.DeprecatedField{
+			DeprecatedFieldName: df.DeprecatedFieldName,
+			NewFieldPath:        df.NewFieldPath,
+			DeprecatedValue:     df.NewDeprecatedValue,
+			NewValue:            df.NewValue,
+		}
+	}
+
+	return common_webhook.ValidateDeprecatedFieldsCreate(deprecatedFields, basePath), nil
 }
 
 // validateDeprecatedFieldsUpdate validates deprecated fields during UPDATE operations
-// using reflection to automatically discover fields with deprecated tags
 func (spec *CinderSpecBase) validateDeprecatedFieldsUpdate(old CinderSpecBase, basePath *field.Path) ([]string, field.ErrorList) {
-	return common_webhook.ValidateDeprecatedFieldsUpdate(old, *spec, basePath)
+	// Get deprecated fields list with old values
+	deprecatedFields := spec.getDeprecatedFields(&old)
+	return common_webhook.ValidateDeprecatedFieldsUpdate(deprecatedFields, basePath)
 }
 
 var _ webhook.Validator = &Cinder{}
