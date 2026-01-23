@@ -69,7 +69,8 @@ type CinderSpecBase struct {
 	// +kubebuilder:default=rabbitmq
 	// RabbitMQ instance name
 	// Needed to request a transportURL that is created and used in Cinder
-	RabbitMqClusterName string `json:"rabbitMqClusterName"`
+	// Deprecated: Use MessagingBus.Cluster instead
+	RabbitMqClusterName string `json:"rabbitMqClusterName" deprecated:"messagingBus.cluster"`
 
 	// +kubebuilder:validation:Optional
 	// MessagingBus configuration (username, vhost, and cluster)
@@ -123,7 +124,8 @@ type CinderSpecBase struct {
 	// +kubebuilder:validation:Optional
 	// RabbitMQ instance name used to request a transportURL that is used for
 	// notification purposes
-	NotificationsBusInstance *string `json:"notificationsBusInstance,omitempty"`
+	// Deprecated: Use NotificationsBus.Cluster instead
+	NotificationsBusInstance *string `json:"notificationsBusInstance,omitempty" deprecated:"notificationsBus.cluster"`
 }
 
 // CinderSpecCore the same as CinderSpec without ContainerImage references

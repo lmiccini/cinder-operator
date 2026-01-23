@@ -2069,6 +2069,7 @@ spec:
                 description: |-
                   RabbitMQ instance name used to request a transportURL that is used for
                   notification purposes
+                  Deprecated: Use NotificationsBus.Cluster instead
                 type: string
               passwordSelectors:
                 default:
@@ -2092,6 +2093,7 @@ spec:
                 description: |-
                   RabbitMQ instance name
                   Needed to request a transportURL that is created and used in Cinder
+                  Deprecated: Use MessagingBus.Cluster instead
                 type: string
               secret:
                 description: Secret containing OpenStack password information
