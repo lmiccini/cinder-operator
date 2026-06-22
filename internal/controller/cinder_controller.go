@@ -52,6 +52,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/job"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/object"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
@@ -83,8 +84,9 @@ func (r *CinderReconciler) GetScheme() *runtime.Scheme {
 // CinderReconciler reconciles a Cinder object
 type CinderReconciler struct {
 	client.Client
-	Kclient kubernetes.Interface
-	Scheme  *runtime.Scheme
+	Kclient   kubernetes.Interface
+	Scheme    *runtime.Scheme
+	APIReader client.Reader
 }
 
 // GetLogger returns a logger object with a logging prefix of "controller.name" and additional controller context fields
@@ -156,6 +158,7 @@ func (r *CinderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		Log.Error(err, fmt.Sprintf("could not instantiate helper for instance %s", instance.Name))
 		return ctrl.Result{}, err
 	}
+	helper.SetAPIReader(r.APIReader)
 
 	//
 	// initialize status
@@ -448,8 +451,19 @@ func (r *CinderReconciler) reconcileDelete(ctx context.Context, instance *cinder
 		instance.Status.ApplicationCredentialSecret,
 		instance.Spec.Auth.ApplicationCredentialSecret,
 	} {
-		if err := keystonev1.RemoveACSecretConsumerFinalizer(ctx, helper, instance.Namespace,
+		if err := object.RemoveSecretConsumerFinalizer(ctx, helper, instance.Namespace,
 			secretName, cinder.ACConsumerFinalizer); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	if err := object.RemoveSecretConsumerFinalizer(ctx, helper, instance.Namespace,
+		instance.Status.TransportURLSecret, cinder.TransportConsumerFinalizer); err != nil {
+		return ctrl.Result{}, err
+	}
+	if instance.Status.NotificationsURLSecret != nil {
+		if err := object.RemoveSecretConsumerFinalizer(ctx, helper, instance.Namespace,
+			*instance.Status.NotificationsURLSecret, cinder.TransportConsumerFinalizer); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -611,9 +625,7 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 		Log.Info(fmt.Sprintf("TransportURL %s successfully reconciled - operation: %s", transportURL.Name, string(op)))
 	}
 
-	instance.Status.TransportURLSecret = transportURL.Status.SecretName
-
-	if instance.Status.TransportURLSecret == "" {
+	if transportURL.Status.SecretName == "" {
 		Log.Info(fmt.Sprintf("Waiting for TransportURL %s secret to be created", transportURL.Name))
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.RabbitMqTransportURLReadyCondition,
@@ -625,6 +637,19 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 
 	instance.Status.Conditions.MarkTrue(condition.RabbitMqTransportURLReadyCondition, condition.RabbitMqTransportURLReadyMessage)
 
+	// Set status early for first-time setup so PatchInstance persists it
+	// even on early returns. During rotation (old != current), the status
+	// is only updated by FinalizeSecretRotation at end of reconcile.
+	if instance.Status.TransportURLSecret == "" ||
+		instance.Status.TransportURLSecret == transportURL.Status.SecretName {
+		instance.Status.TransportURLSecret = transportURL.Status.SecretName
+	}
+
+	if err := object.ManageSecretConsumerFinalizer(ctx, helper, instance.Namespace,
+		transportURL.Status.SecretName, cinder.TransportConsumerFinalizer); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// end transportURL
 
 	//
@@ -634,15 +659,17 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 
 	// Determine if notifications are enabled by checking NotificationsBus.Cluster
 	// (the webhook defaults this from the deprecated NotificationsBusInstance field)
+	var notificationBusInstanceURL *rabbitmqv1.TransportURL
 	if instance.Spec.NotificationsBus != nil && instance.Spec.NotificationsBus.Cluster != "" {
-		// init .Status.NotificationURLSecret
+		// init .Status.NotificationsURLSecret
 		instance.Status.NotificationsURLSecret = ptr.To("")
 
 		// Use NotificationsBus config (never fall back to MessagingBus to ensure separation)
 		notificationsRabbitMqConfig := *instance.Spec.NotificationsBus
 		// A separate TransportURL is always created for notifications,
 		// even when using the same cluster as messaging (to allow different vhost/user)
-		notificationBusInstanceURL, op, err := r.transportURLCreateOrUpdate(ctx, instance, serviceLabels, true, notificationsRabbitMqConfig)
+		var op controllerutil.OperationResult
+		notificationBusInstanceURL, op, err = r.transportURLCreateOrUpdate(ctx, instance, serviceLabels, true, notificationsRabbitMqConfig)
 		if err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.NotificationBusInstanceReadyCondition,
@@ -657,9 +684,7 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 			Log.Info(fmt.Sprintf("NotificationBusInstanceURL %s successfully reconciled - operation: %s", notificationBusInstanceURL.Name, string(op)))
 		}
 
-		*instance.Status.NotificationsURLSecret = notificationBusInstanceURL.Status.SecretName
-
-		if instance.Status.NotificationsURLSecret == nil {
+		if notificationBusInstanceURL.Status.SecretName == "" {
 			Log.Info(fmt.Sprintf("Waiting for NotificationBusInstanceURL %s secret to be created", notificationBusInstanceURL.Name))
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.NotificationBusInstanceReadyCondition,
@@ -667,6 +692,19 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 				condition.SeverityInfo,
 				condition.NotificationBusInstanceReadyRunningMessage))
 			return cinder.ResultRequeue, nil
+		}
+
+		// Set status early for first-time setup so PatchInstance persists it
+		// even on early returns. During rotation (old != current), the status
+		// is only updated by FinalizeSecretRotation at end of reconcile.
+		if instance.Status.NotificationsURLSecret == nil ||
+			*instance.Status.NotificationsURLSecret == notificationBusInstanceURL.Status.SecretName {
+			instance.Status.NotificationsURLSecret = ptr.To(notificationBusInstanceURL.Status.SecretName)
+		}
+
+		if err := object.ManageSecretConsumerFinalizer(ctx, helper, instance.Namespace,
+			notificationBusInstanceURL.Status.SecretName, cinder.TransportConsumerFinalizer); err != nil {
+			return ctrl.Result{}, err
 		}
 
 		instance.Status.Conditions.MarkTrue(condition.NotificationBusInstanceReadyCondition, condition.NotificationBusInstanceReadyMessage)
@@ -755,7 +793,11 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 	//
 	// Create Secrets required as input for the Service and calculate an overall hash of hashes
 	//
-	err = r.generateServiceConfigs(ctx, helper, instance, &configVars, serviceLabels, memcached, db)
+	notificationsURLSecretName := ""
+	if notificationBusInstanceURL != nil {
+		notificationsURLSecretName = notificationBusInstanceURL.Status.SecretName
+	}
+	err = r.generateServiceConfigs(ctx, helper, instance, &configVars, serviceLabels, memcached, db, transportURL.Status.SecretName, notificationsURLSecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.ServiceConfigReadyCondition,
@@ -795,9 +837,8 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 	// The old secret's finalizer is removed later (after all services deploy)
 	// so that rapid rotations don't revoke a credential still in use by pods.
 	if instance.Spec.Auth.ApplicationCredentialSecret != "" {
-		if err := keystonev1.ManageACSecretFinalizer(ctx, helper, instance.Namespace,
+		if err := object.ManageSecretConsumerFinalizer(ctx, helper, instance.Namespace,
 			instance.Spec.Auth.ApplicationCredentialSecret,
-			"",
 			cinder.ACConsumerFinalizer); err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.ServiceConfigReadyCondition,
@@ -867,8 +908,12 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 	// normal reconcile tasks
 	//
 
+	allSubCRsStable := true
+	rotationInProgress := instance.Status.TransportURLSecret != "" &&
+		instance.Status.TransportURLSecret != transportURL.Status.SecretName
+
 	// deploy cinder-api
-	cinderAPI, op, err := r.apiDeploymentCreateOrUpdate(ctx, instance)
+	cinderAPI, op, err := r.apiDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName, notificationsURLSecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			cinderv1beta1.CinderAPIReadyCondition,
@@ -878,8 +923,12 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 			err.Error()))
 		return ctrl.Result{}, err
 	}
+	if err := helper.EnsureFresh(ctx, op, cinderAPI, rotationInProgress); err != nil {
+		return ctrl.Result{}, err
+	}
 	if op != controllerutil.OperationResultNone {
 		Log.Info(fmt.Sprintf("API CR for %s successfully %s", instance.Name, string(op)))
+		allSubCRsStable = false
 	}
 
 	// Mirror values when the data in the StatefulSet is for the current generation
@@ -897,7 +946,7 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 	}
 
 	// deploy cinder-scheduler
-	cinderScheduler, op, err := r.schedulerDeploymentCreateOrUpdate(ctx, instance)
+	cinderScheduler, op, err := r.schedulerDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName, notificationsURLSecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			cinderv1beta1.CinderSchedulerReadyCondition,
@@ -907,8 +956,12 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 			err.Error()))
 		return ctrl.Result{}, err
 	}
+	if err := helper.EnsureFresh(ctx, op, cinderScheduler, rotationInProgress); err != nil {
+		return ctrl.Result{}, err
+	}
 	if op != controllerutil.OperationResultNone {
 		Log.Info(fmt.Sprintf("Scheduler CR for %s successfully %s", instance.Name, string(op)))
+		allSubCRsStable = false
 	}
 
 	// Mirror values when the data in the StatefulSet is for the current generation
@@ -935,7 +988,7 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 	// Many OpenStack deployments don't use the cinder-backup service (it's optional),
 	// so there's no need to deploy it unless it's required.
 	if *instance.Spec.CinderBackup.Replicas > 0 && instance.Spec.CinderBackups == nil {
-		cinderBackup, op, err := r.backupDeploymentCreateOrUpdate(ctx, instance, crName, nil)
+		cinderBackup, op, err := r.backupDeploymentCreateOrUpdate(ctx, instance, crName, nil, transportURL.Status.SecretName, notificationsURLSecretName)
 		if err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				cinderv1beta1.CinderBackupReadyCondition,
@@ -945,8 +998,12 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 				err.Error()))
 			return ctrl.Result{}, err
 		}
+		if err := helper.EnsureFresh(ctx, op, cinderBackup, rotationInProgress); err != nil {
+			return ctrl.Result{}, err
+		}
 		if op != controllerutil.OperationResultNone {
 			Log.Info(fmt.Sprintf("Backup CR for %s successfully %s", instance.Name, string(op)))
+			allSubCRsStable = false
 		}
 		// Mirror values when the data in the StatefulSet is for the current generation
 		if cinderBackup.Generation == cinderBackup.Status.ObservedGeneration {
@@ -981,7 +1038,7 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 			backup := (*instance.Spec.CinderBackups)[name]
 			crName := fmt.Sprintf("%s-backup-%s", instance.Name, name)
 			if *backup.Replicas > 0 {
-				cinderBackup, op, err := r.backupDeploymentCreateOrUpdate(ctx, instance, crName, &backup)
+				cinderBackup, op, err := r.backupDeploymentCreateOrUpdate(ctx, instance, crName, &backup, transportURL.Status.SecretName, notificationsURLSecretName)
 				if err != nil {
 					instance.Status.Conditions.Set(condition.FalseCondition(
 						cinderv1beta1.CinderBackupReadyCondition,
@@ -991,8 +1048,12 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 						err.Error()))
 					return ctrl.Result{}, err
 				}
+				if err := helper.EnsureFresh(ctx, op, cinderBackup, rotationInProgress); err != nil {
+					return ctrl.Result{}, err
+				}
 				if op != controllerutil.OperationResultNone {
 					Log.Info(fmt.Sprintf("Backup CR for %s successfully %s", instance.Name, string(op)))
+					allSubCRsStable = false
 				}
 				if cinderBackup.Generation != cinderBackup.Status.ObservedGeneration {
 					waitingBkpGenerationMatch = true
@@ -1035,7 +1096,7 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 	waitingGenerationMatch := false
 	for _, name := range slices.Sorted(maps.Keys(instance.Spec.CinderVolumes)) {
 		volume := instance.Spec.CinderVolumes[name]
-		cinderVolume, op, err := r.volumeDeploymentCreateOrUpdate(ctx, instance, name, volume)
+		cinderVolume, op, err := r.volumeDeploymentCreateOrUpdate(ctx, instance, name, volume, transportURL.Status.SecretName, notificationsURLSecretName)
 		if err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				cinderv1beta1.CinderVolumeReadyCondition,
@@ -1045,8 +1106,12 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 				err.Error()))
 			return ctrl.Result{}, err
 		}
+		if err := helper.EnsureFresh(ctx, op, cinderVolume, rotationInProgress); err != nil {
+			return ctrl.Result{}, err
+		}
 		if op != controllerutil.OperationResultNone {
 			Log.Info(fmt.Sprintf("Volume %s CR for %s successfully %s", name, instance.Name, string(op)))
+			allSubCRsStable = false
 		}
 
 		// Mirror values when the data in the StatefulSet is for the current generation
@@ -1114,24 +1179,56 @@ func (r *CinderReconciler) reconcileNormal(ctx context.Context, instance *cinder
 
 	Log.Info(fmt.Sprintf("Reconciled Service '%s' successfully", instance.Name))
 
-	// Manage the old AC secret's finalizer and status tracking.
-	// On rotation (old != new), only remove the old secret's finalizer after
-	// all sub-services are ready with the new credentials. This prevents
-	// premature revocation during rapid rotations.
-	isRotation := instance.Status.ApplicationCredentialSecret != "" && instance.Status.ApplicationCredentialSecret != instance.Spec.Auth.ApplicationCredentialSecret
-
-	if isRotation {
-		allServicesReady := instance.Status.Conditions.AllSubConditionIsTrue()
-		if allServicesReady {
-			if err := keystonev1.RemoveACSecretConsumerFinalizer(ctx, helper, instance.Namespace,
-				instance.Status.ApplicationCredentialSecret, cinder.ACConsumerFinalizer); err != nil {
-				return ctrl.Result{}, err
-			}
-			instance.Status.ApplicationCredentialSecret = instance.Spec.Auth.ApplicationCredentialSecret
-		}
-	} else {
-		instance.Status.ApplicationCredentialSecret = instance.Spec.Auth.ApplicationCredentialSecret
+	// When sub-CRs were just updated, their conditions haven't been
+	// persisted yet (PatchInstance race). Requeue to let them process
+	// before evaluating the rotation guard.
+	if !allSubCRsStable {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
+
+	guardReady := condition.CredentialRotationGuardReady(allSubCRsStable, &instance.Status.Conditions)
+
+	transportSecretName, err := object.FinalizeSecretRotation(
+		ctx, helper, instance.Namespace,
+		instance.Status.TransportURLSecret,
+		transportURL.Status.SecretName,
+		cinder.TransportConsumerFinalizer,
+		guardReady,
+	)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	instance.Status.TransportURLSecret = transportSecretName
+
+	if notificationBusInstanceURL != nil {
+		notifStatusSecret := ""
+		if instance.Status.NotificationsURLSecret != nil {
+			notifStatusSecret = *instance.Status.NotificationsURLSecret
+		}
+		notifSecretName, err := object.FinalizeSecretRotation(
+			ctx, helper, instance.Namespace,
+			notifStatusSecret,
+			notificationBusInstanceURL.Status.SecretName,
+			cinder.TransportConsumerFinalizer,
+			guardReady,
+		)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		instance.Status.NotificationsURLSecret = ptr.To(notifSecretName)
+	}
+
+	acSecretName, err := object.FinalizeSecretRotation(
+		ctx, helper, instance.Namespace,
+		instance.Status.ApplicationCredentialSecret,
+		instance.Spec.Auth.ApplicationCredentialSecret,
+		cinder.ACConsumerFinalizer,
+		guardReady,
+	)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	instance.Status.ApplicationCredentialSecret = acSecretName
 
 	// update the overall status condition if service is ready
 	if instance.IsReady() {
@@ -1149,6 +1246,8 @@ func (r *CinderReconciler) generateServiceConfigs(
 	serviceLabels map[string]string,
 	memcached *memcachedv1.Memcached,
 	db *mariadbv1.Database,
+	transportURLSecretName string,
+	notificationsURLSecretName string,
 ) error {
 	//
 	// create Secret required for cinder input
@@ -1187,7 +1286,7 @@ func (r *CinderReconciler) generateServiceConfigs(
 		return err
 	}
 
-	transportURLSecret, _, err := secret.GetSecret(ctx, h, instance.Status.TransportURLSecret, instance.Namespace)
+	transportURLSecret, _, err := secret.GetSecret(ctx, h, transportURLSecretName, instance.Namespace)
 	if err != nil {
 		return err
 	}
@@ -1260,10 +1359,10 @@ func (r *CinderReconciler) generateServiceConfigs(
 	}
 
 	var notificationInstanceURLSecret *corev1.Secret
-	if instance.Status.NotificationsURLSecret != nil {
+	if notificationsURLSecretName != "" {
 		// A separate TransportURL is always created for notifications (even when using the same cluster)
 		// to allow different vhost/user configuration for isolation, so always use the dedicated secret
-		notificationInstanceURLSecret, _, err = secret.GetSecret(ctx, h, *instance.Status.NotificationsURLSecret, instance.Namespace)
+		notificationInstanceURLSecret, _, err = secret.GetSecret(ctx, h, notificationsURLSecretName, instance.Namespace)
 		if err != nil {
 			return err
 		}
@@ -1359,13 +1458,13 @@ func (r *CinderReconciler) transportURLCreateOrUpdate(
 	return transportURL, op, err
 }
 
-func (r *CinderReconciler) apiDeploymentCreateOrUpdate(ctx context.Context, instance *cinderv1beta1.Cinder) (*cinderv1beta1.CinderAPI, controllerutil.OperationResult, error) {
+func (r *CinderReconciler) apiDeploymentCreateOrUpdate(ctx context.Context, instance *cinderv1beta1.Cinder, transportURLSecretName string, notificationsURLSecretName string) (*cinderv1beta1.CinderAPI, controllerutil.OperationResult, error) {
 	cinderAPISpec := cinderv1beta1.CinderAPISpec{
 		CinderTemplate:     instance.Spec.CinderTemplate,
 		CinderAPITemplate:  instance.Spec.CinderAPI,
 		ExtraMounts:        instance.Spec.ExtraMounts,
 		DatabaseHostname:   instance.Status.DatabaseHostname,
-		TransportURLSecret: instance.Status.TransportURLSecret,
+		TransportURLSecret: transportURLSecretName,
 		ServiceAccount:     instance.RbacResourceName(),
 		MemcachedInstance:  &instance.Spec.MemcachedInstance,
 		APITimeout:         instance.Spec.APITimeout,
@@ -1391,8 +1490,8 @@ func (r *CinderReconciler) apiDeploymentCreateOrUpdate(ctx context.Context, inst
 	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		deployment.Spec = cinderAPISpec
 
-		if instance.Spec.NotificationsBus != nil && instance.Spec.NotificationsBus.Cluster != "" {
-			deployment.Spec.NotificationsURLSecret = *instance.Status.NotificationsURLSecret
+		if notificationsURLSecretName != "" {
+			deployment.Spec.NotificationsURLSecret = notificationsURLSecretName
 		}
 
 		err := controllerutil.SetControllerReference(instance, deployment, r.Scheme)
@@ -1406,13 +1505,13 @@ func (r *CinderReconciler) apiDeploymentCreateOrUpdate(ctx context.Context, inst
 	return deployment, op, err
 }
 
-func (r *CinderReconciler) schedulerDeploymentCreateOrUpdate(ctx context.Context, instance *cinderv1beta1.Cinder) (*cinderv1beta1.CinderScheduler, controllerutil.OperationResult, error) {
+func (r *CinderReconciler) schedulerDeploymentCreateOrUpdate(ctx context.Context, instance *cinderv1beta1.Cinder, transportURLSecretName string, notificationsURLSecretName string) (*cinderv1beta1.CinderScheduler, controllerutil.OperationResult, error) {
 	cinderSchedulerSpec := cinderv1beta1.CinderSchedulerSpec{
 		CinderTemplate:          instance.Spec.CinderTemplate,
 		CinderSchedulerTemplate: instance.Spec.CinderScheduler,
 		ExtraMounts:             instance.Spec.ExtraMounts,
 		DatabaseHostname:        instance.Status.DatabaseHostname,
-		TransportURLSecret:      instance.Status.TransportURLSecret,
+		TransportURLSecret:      transportURLSecretName,
 		ServiceAccount:          instance.RbacResourceName(),
 		TLS:                     instance.Spec.CinderAPI.TLS.Ca,
 		MemcachedInstance:       &instance.Spec.MemcachedInstance,
@@ -1438,8 +1537,8 @@ func (r *CinderReconciler) schedulerDeploymentCreateOrUpdate(ctx context.Context
 	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		deployment.Spec = cinderSchedulerSpec
 
-		if instance.Spec.NotificationsBus != nil && instance.Spec.NotificationsBus.Cluster != "" {
-			deployment.Spec.NotificationsURLSecret = *instance.Status.NotificationsURLSecret
+		if notificationsURLSecretName != "" {
+			deployment.Spec.NotificationsURLSecret = notificationsURLSecretName
 		}
 
 		err := controllerutil.SetControllerReference(instance, deployment, r.Scheme)
@@ -1458,13 +1557,15 @@ func (r *CinderReconciler) backupDeploymentCreateOrUpdate(
 	instance *cinderv1beta1.Cinder,
 	name string,
 	bkpTemplate *cinderv1beta1.CinderBackupTemplate,
+	transportURLSecretName string,
+	notificationsURLSecretName string,
 ) (*cinderv1beta1.CinderBackup, controllerutil.OperationResult, error) {
 
 	cinderBackupSpec := cinderv1beta1.CinderBackupSpec{
 		CinderTemplate:     instance.Spec.CinderTemplate,
 		ExtraMounts:        instance.Spec.ExtraMounts,
 		DatabaseHostname:   instance.Status.DatabaseHostname,
-		TransportURLSecret: instance.Status.TransportURLSecret,
+		TransportURLSecret: transportURLSecretName,
 		ServiceAccount:     instance.RbacResourceName(),
 		TLS:                instance.Spec.CinderAPI.TLS.Ca,
 		MemcachedInstance:  &instance.Spec.MemcachedInstance,
@@ -1490,8 +1591,8 @@ func (r *CinderReconciler) backupDeploymentCreateOrUpdate(
 	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		deployment.Spec = cinderBackupSpec
 
-		if instance.Spec.NotificationsBus != nil && instance.Spec.NotificationsBus.Cluster != "" {
-			deployment.Spec.NotificationsURLSecret = *instance.Status.NotificationsURLSecret
+		if notificationsURLSecretName != "" {
+			deployment.Spec.NotificationsURLSecret = notificationsURLSecretName
 		}
 
 		err := controllerutil.SetControllerReference(instance, deployment, r.Scheme)
@@ -1537,13 +1638,13 @@ func (r *CinderReconciler) backupCleanupDeployment(
 	return nil
 }
 
-func (r *CinderReconciler) volumeDeploymentCreateOrUpdate(ctx context.Context, instance *cinderv1beta1.Cinder, name string, volTemplate cinderv1beta1.CinderVolumeTemplate) (*cinderv1beta1.CinderVolume, controllerutil.OperationResult, error) {
+func (r *CinderReconciler) volumeDeploymentCreateOrUpdate(ctx context.Context, instance *cinderv1beta1.Cinder, name string, volTemplate cinderv1beta1.CinderVolumeTemplate, transportURLSecretName string, notificationsURLSecretName string) (*cinderv1beta1.CinderVolume, controllerutil.OperationResult, error) {
 	cinderVolumeSpec := cinderv1beta1.CinderVolumeSpec{
 		CinderTemplate:       instance.Spec.CinderTemplate,
 		CinderVolumeTemplate: volTemplate,
 		ExtraMounts:          instance.Spec.ExtraMounts,
 		DatabaseHostname:     instance.Status.DatabaseHostname,
-		TransportURLSecret:   instance.Status.TransportURLSecret,
+		TransportURLSecret:   transportURLSecretName,
 		ServiceAccount:       instance.RbacResourceName(),
 		TLS:                  instance.Spec.CinderAPI.TLS.Ca,
 		MemcachedInstance:    &instance.Spec.MemcachedInstance,
@@ -1568,8 +1669,8 @@ func (r *CinderReconciler) volumeDeploymentCreateOrUpdate(ctx context.Context, i
 	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		deployment.Spec = cinderVolumeSpec
 
-		if instance.Spec.NotificationsBus != nil && instance.Spec.NotificationsBus.Cluster != "" {
-			deployment.Spec.NotificationsURLSecret = *instance.Status.NotificationsURLSecret
+		if notificationsURLSecretName != "" {
+			deployment.Spec.NotificationsURLSecret = notificationsURLSecretName
 		}
 
 		err := controllerutil.SetControllerReference(instance, deployment, r.Scheme)
